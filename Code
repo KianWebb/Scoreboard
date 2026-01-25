@@ -1,0 +1,197 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define BUTTON_PIN 0   // BOOT button
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// WiFi credentials
+const char* ssid = "Kian's Smart";
+const char* password = "SmartHomeDevices";
+
+// GitHub RAW file (UPDATED)
+const char* scoreURL =
+"https://raw.githubusercontent.com/KianWebb/Scoreboard/main/Main%20Score";
+
+// Update timing (2 minutes)
+unsigned long lastUpdateAttempt = 0;
+const unsigned long updateInterval = 120000;
+
+// Score data
+String teamName = "";
+String scoreLine = "";
+String scrollText = "";
+
+// Scrolling variables
+int scrollX = SCREEN_WIDTH;
+int scrollDir = -1;
+unsigned long lastScroll = 0;
+unsigned long pauseStart = 0;
+bool isPaused = false;
+
+const int scrollSpeed = 20;
+const int pauseDuration = 2000;
+
+void setup() {
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  Serial.begin(115200);
+  Wire.begin(21, 22);
+
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextWrap(false);
+
+  showStartupScreen();
+  connectWiFi();
+  updateScore();
+}
+
+void loop() {
+  // Manual update (BOOT button)
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    updateScore();
+    delay(500);
+  }
+
+  // Timed update
+  if (millis() - lastUpdateAttempt >= updateInterval) {
+    updateScore();
+  }
+
+  drawScoreboard();
+}
+
+// ---------- STARTUP ----------
+void showStartupScreen() {
+  unsigned long start = millis();
+  unsigned long lastAnim = 0;
+  int dotCount = 0;
+
+  while (millis() - start < 6000) {
+    unsigned long now = millis();
+
+    if (now - lastAnim >= 500) {
+      dotCount = (dotCount + 1) % 3;  // 0–2 dots only
+      lastAnim = now;
+    }
+
+    String title = "Starting";
+    for (int i = 0; i < dotCount; i++) title += ".";
+
+    display.clearDisplay();
+    display.setTextSize(2);
+    centerText(title, 10);
+
+    display.setTextSize(1);
+    centerText("scoreboard by kian", 46);
+
+    display.display();
+    delay(30);
+  }
+}
+
+// ---------- WIFI ----------
+void connectWiFi() {
+  WiFi.begin(ssid, password);
+  unsigned long startAttempt = millis();
+
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 6000) {
+    delay(200);
+  }
+}
+
+// ---------- FETCH SCORE ----------
+void updateScore() {
+  lastUpdateAttempt = millis();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFi.reconnect();
+    return;
+  }
+
+  HTTPClient http;
+  http.begin(scoreURL);
+  int httpCode = http.GET();
+
+  if (httpCode == 200) {
+    String data = http.getString();
+
+    int a = data.indexOf('\n');
+    int b = data.indexOf('\n', a + 1);
+
+    teamName = data.substring(0, a);
+    scoreLine = data.substring(a + 1, b);
+    scrollText = data.substring(b + 1);
+
+    scrollX = SCREEN_WIDTH;
+    scrollDir = -1;
+    isPaused = false;
+  }
+
+  http.end();
+}
+
+// ---------- DRAW ----------
+void drawScoreboard() {
+  display.clearDisplay();
+
+  // Team name
+  display.setTextSize(1);
+  centerText(teamName, 0);
+
+  // BIG score
+  display.setTextSize(3);
+  centerText(scoreLine, 18);
+
+  // Scrolling bottom text
+  display.setTextSize(1);
+
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(scrollText, 0, 0, &x1, &y1, &w, &h);
+
+  display.setCursor(scrollX, 52);
+  display.print(scrollText);
+
+  unsigned long now = millis();
+
+  if (isPaused) {
+    if (now - pauseStart >= pauseDuration) {
+      isPaused = false;
+      scrollDir = -scrollDir;
+    }
+  } else if (now - lastScroll >= scrollSpeed) {
+    scrollX += scrollDir;
+
+    if (scrollX <= SCREEN_WIDTH - w) {
+      scrollX = SCREEN_WIDTH - w;
+      isPaused = true;
+      pauseStart = now;
+    }
+
+    if (scrollX >= 0) {
+      scrollX = 0;
+      isPaused = true;
+      pauseStart = now;
+    }
+
+    lastScroll = now;
+  }
+
+  display.display();
+}
+
+// ---------- CENTER TEXT ----------
+void centerText(String text, int y) {
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_WIDTH - w) / 2, y);
+  display.print(text);
+}

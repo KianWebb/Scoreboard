@@ -1,5 +1,11 @@
 Just a dump of anything that the bots need
 
+ # Temp Settings #
+
+DEVICE_ID = "a480135bf8";
+TOKEN     = "ec163009e58348645c014cd4f7b90df2d64c0c7e";
+APPID     = "K0OCDSvIaBWdEaU4zxlKEwk26kmshoXK";
+
  # Arenas #
 
 Panthers: Motorpoint Arena

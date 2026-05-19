@@ -24,3 +24,664 @@ Steelers: Utilita Arena
 Scoreboard Update
 - - -
 Scoreboard under server update, this may take awhile.
+
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <time.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define BUTTON_PIN 0
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// ---------------- WIFI ----------------
+const char* ssid = "Kian's Smart";
+const char* password = "SmartHomeDevices";
+
+// ---------------- FILES ----------------
+const char* scoreURL =
+"https://raw.githubusercontent.com/KianWebb/Scoreboard/main/Main%20Score";
+
+const char* gamesURL =
+"https://raw.githubusercontent.com/KianWebb/Scoreboard/main/Games";
+
+// ---------------- POND TEMP ----------------
+const char* DEVICE_ID = "a480135bf8";
+const char* TOKEN     = "ec163009e58348645c014cd4f7b90df2d64c0c7e";
+const char* APPID     = "K0OCDSvIaBWdEaU4zxlKEwk26kmshoXK";
+
+float pondTemp = 0;
+unsigned long lastTempUpdate = 0;
+
+// ---------------- TIMING ----------------
+const unsigned long updateInterval = 120000;
+unsigned long lastUpdateAttempt = 0;
+
+// ---------------- MATCH MODE ----------------
+bool matchMode = false;
+time_t matchEpoch = 0;
+String lastMatchDate = "";
+
+// ---------------- CLOCK MODE ----------------
+bool clockMode = false;
+unsigned long buttonPressStart = 0;
+bool buttonHeld = false;
+
+// ---------------- DISPLAY DATA ----------------
+String teamName = "";
+String scoreLine = "";
+String scrollText = "";
+String clockScrollText = "";
+
+// ---------------- SCROLL ----------------
+int scrollX = SCREEN_WIDTH;
+int scrollDir = -1;
+
+unsigned long lastScroll = 0;
+unsigned long pauseStart = 0;
+
+bool isPaused = false;
+
+const int scrollSpeed = 20;
+const int pauseDuration = 2000;
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup() {
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  Serial.begin(115200);
+
+  Wire.begin(21, 22);
+
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextWrap(false);
+
+  showStartupScreen();
+
+  connectWiFi();
+
+  configTime(0, 0, "pool.ntp.org");
+
+  updateScore();
+
+  pondTemp = getTemperature();
+}
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop() {
+
+  handleButton();
+
+  // UPDATE TEMP EVERY 30 SECONDS
+  if (millis() - lastTempUpdate > 30000) {
+    pondTemp = getTemperature();
+    lastTempUpdate = millis();
+  }
+
+  // CLOCK MODE
+  if (clockMode) {
+    drawClock();
+    return;
+  }
+
+  checkMatchDay();
+
+  // MATCH COUNTDOWN
+  if (matchMode) {
+
+    drawCountdown();
+
+  } else {
+
+    // MANUAL REFRESH BUTTON
+    if (digitalRead(BUTTON_PIN) == LOW) {
+      updateScore();
+      delay(500);
+    }
+
+    // AUTO REFRESH
+    if (millis() - lastUpdateAttempt >= updateInterval) {
+      updateScore();
+    }
+
+    drawScoreboard();
+  }
+}
+
+// =====================================================
+// BUTTON HOLD
+// =====================================================
+
+void handleButton() {
+
+  bool pressed = digitalRead(BUTTON_PIN) == LOW;
+
+  if (pressed && !buttonHeld) {
+    buttonPressStart = millis();
+    buttonHeld = true;
+  }
+
+  if (!pressed && buttonHeld) {
+
+    unsigned long heldTime = millis() - buttonPressStart;
+
+    if (heldTime > 2000) {
+
+      clockMode = !clockMode;
+
+      scrollX = SCREEN_WIDTH;
+      scrollDir = -1;
+      isPaused = false;
+    }
+
+    buttonHeld = false;
+  }
+}
+
+// =====================================================
+// MATCH CHECK
+// =====================================================
+
+void checkMatchDay() {
+
+  struct tm timeinfo;
+
+  if (!getLocalTime(&timeinfo)) return;
+
+  char dateStr[6];
+
+  strftime(dateStr, sizeof(dateStr), "%d/%m", &timeinfo);
+
+  int hour = timeinfo.tm_hour;
+
+  if (hour >= 12 && String(dateStr) != lastMatchDate) {
+
+    fetchGames(String(dateStr));
+
+    lastMatchDate = String(dateStr);
+  }
+}
+
+// =====================================================
+// FETCH GAMES
+// =====================================================
+
+void fetchGames(String today) {
+
+  struct tm timeinfo;
+
+  if (!getLocalTime(&timeinfo)) return;
+
+  HTTPClient http;
+
+  http.begin(gamesURL);
+
+  if (http.GET() == 200) {
+
+    String data = http.getString();
+
+    int start = 0;
+
+    while (true) {
+
+      int end = data.indexOf('\n', start);
+
+      if (end == -1) break;
+
+      String line = data.substring(start, end);
+
+      if (line.startsWith(today)) {
+
+        int c1 = line.indexOf(',');
+        int c2 = line.indexOf(',', c1 + 1);
+        int c3 = line.indexOf(',', c2 + 1);
+
+        String fixture = line.substring(6, c1);
+        String location = line.substring(c1 + 2, c2);
+        String league = line.substring(c2 + 2, c3);
+        String timeStr = line.substring(c3 + 2);
+
+        int vIndex = fixture.indexOf("V");
+
+        String opponent = fixture.substring(vIndex + 2);
+
+        teamName = "Panthers V " + opponent;
+
+        scrollText = location + " - " + league;
+
+        struct tm matchTime = {0};
+
+        matchTime.tm_mday = today.substring(0,2).toInt();
+        matchTime.tm_mon  = today.substring(3,5).toInt() - 1;
+        matchTime.tm_year = timeinfo.tm_year;
+
+        matchTime.tm_hour = timeStr.substring(0,2).toInt();
+        matchTime.tm_min  = timeStr.substring(3,5).toInt();
+        matchTime.tm_sec  = 0;
+
+        matchEpoch = mktime(&matchTime);
+
+        matchMode = true;
+
+        resetScroll();
+
+        break;
+      }
+
+      start = end + 1;
+    }
+  }
+
+  http.end();
+}
+
+// =====================================================
+// FETCH SCORE
+// =====================================================
+
+void updateScore() {
+
+  lastUpdateAttempt = millis();
+
+  HTTPClient http;
+
+  http.begin(scoreURL);
+
+  if (http.GET() == 200) {
+
+    String data = http.getString();
+
+    int a = data.indexOf('\n');
+    int b = data.indexOf('\n', a + 1);
+    int c = data.indexOf('\n', b + 1);
+
+    teamName = data.substring(0, a);
+
+    scoreLine = data.substring(a + 1, b);
+
+    scrollText = data.substring(b + 1, c);
+
+    clockScrollText = data.substring(c + 1);
+
+    resetScroll();
+  }
+
+  http.end();
+}
+
+// =====================================================
+// TEMPERATURE
+// =====================================================
+
+float getTemperature() {
+
+  WiFiClientSecure client;
+
+  client.setInsecure();
+  client.setTimeout(10);
+
+  HTTPClient http;
+
+  http.setTimeout(10000);
+
+  String url =
+  "https://eu-apia.coolkit.cc/v2/device/thing/status?id=";
+
+  url += DEVICE_ID;
+  url += "&type=1";
+
+  http.begin(client, url);
+
+  http.addHeader(
+    "Authorization",
+    String("Bearer ") + TOKEN
+  );
+
+  http.addHeader("X-CK-Appid", APPID);
+
+  http.addHeader(
+    "Content-Type",
+    "application/json"
+  );
+
+  int code = http.GET();
+
+  if (code == 200) {
+
+    String response = http.getString();
+
+    StaticJsonDocument<2048> resp;
+
+    deserializeJson(resp, response);
+
+    if (resp["error"] == 0) {
+
+      const char* tempStr =
+      resp["data"]["params"]["temperature"];
+
+      float temp = atof(tempStr);
+
+      http.end();
+
+      return temp;
+    }
+  }
+
+  http.end();
+
+  return pondTemp;
+}
+
+// =====================================================
+// SCOREBOARD
+// =====================================================
+
+void drawScoreboard() {
+
+  display.clearDisplay();
+
+  // TEAM
+  display.setTextSize(1);
+  centerText(teamName, 0);
+
+  // SCORE
+  display.setTextSize(3);
+  centerText(scoreLine, 18);
+
+  // TEMP
+  display.setTextSize(1);
+
+  String tempText =
+  String(pondTemp, 1) + "C";
+
+  display.setCursor(0, 52);
+  display.print(tempText);
+
+  // SCROLL
+  drawScrollingText(scrollText, tempText);
+
+  display.display();
+}
+
+// =====================================================
+// CLOCK
+// =====================================================
+
+void drawClock() {
+
+  struct tm timeinfo;
+
+  if (!getLocalTime(&timeinfo)) return;
+
+  char timeStr[9];
+
+  sprintf(
+    timeStr,
+    "%02d:%02d:%02d",
+    timeinfo.tm_hour,
+    timeinfo.tm_min,
+    timeinfo.tm_sec
+  );
+
+  char dateStr[11];
+
+  strftime(
+    dateStr,
+    sizeof(dateStr),
+    "%d/%m/%Y",
+    &timeinfo
+  );
+
+  display.clearDisplay();
+
+  // DATE
+  display.setTextSize(1);
+  centerText(String(dateStr), 0);
+
+  // TIME
+  display.setTextSize(2);
+  centerText(String(timeStr), 20);
+
+  // TEMP
+  display.setTextSize(1);
+
+  String tempText =
+  String(pondTemp, 1) + "C";
+
+  display.setCursor(0, 52);
+  display.print(tempText);
+
+  // SCROLL
+  drawScrollingText(clockScrollText, tempText);
+
+  display.display();
+}
+
+// =====================================================
+// COUNTDOWN
+// =====================================================
+
+void drawCountdown() {
+
+  time_t now = time(NULL);
+
+  long diff = matchEpoch - now;
+
+  if (diff <= 0) {
+
+    matchMode = false;
+
+    updateScore();
+
+    return;
+  }
+
+  int hours = diff / 3600;
+  int minutes = (diff % 3600) / 60;
+  int seconds = diff % 60;
+
+  char buffer[9];
+
+  sprintf(
+    buffer,
+    "%02d:%02d:%02d",
+    hours,
+    minutes,
+    seconds
+  );
+
+  display.clearDisplay();
+
+  // TEAM
+  display.setTextSize(1);
+  centerText(teamName, 0);
+
+  // TIMER
+  display.setTextSize(2);
+  centerText(String(buffer), 20);
+
+  // TEMP
+  display.setTextSize(1);
+
+  String tempText =
+  String(pondTemp, 1) + "C";
+
+  display.setCursor(0, 52);
+  display.print(tempText);
+
+  // SCROLL
+  drawScrollingText(scrollText, tempText);
+
+  display.display();
+}
+
+// =====================================================
+// SCROLL TEXT
+// =====================================================
+
+void drawScrollingText(
+  String text,
+  String tempText
+) {
+
+  int offset = tempText.length() * 6 + 8;
+
+  int16_t x1, y1;
+  uint16_t w, h;
+
+  display.getTextBounds(
+    text,
+    0,
+    0,
+    &x1,
+    &y1,
+    &w,
+    &h
+  );
+
+  display.setCursor(scrollX + offset, 52);
+
+  display.print(text);
+
+  unsigned long nowMillis = millis();
+
+  if (isPaused) {
+
+    if (nowMillis - pauseStart >= pauseDuration) {
+
+      isPaused = false;
+
+      scrollDir = -scrollDir;
+    }
+
+  } else if (nowMillis - lastScroll >= scrollSpeed) {
+
+    scrollX += scrollDir;
+
+    if (scrollX <= SCREEN_WIDTH - w - offset) {
+
+      scrollX = SCREEN_WIDTH - w - offset;
+
+      isPaused = true;
+
+      pauseStart = nowMillis;
+    }
+
+    if (scrollX >= 0) {
+
+      scrollX = 0;
+
+      isPaused = true;
+
+      pauseStart = nowMillis;
+    }
+
+    lastScroll = nowMillis;
+  }
+}
+
+// =====================================================
+// RESET SCROLL
+// =====================================================
+
+void resetScroll() {
+
+  scrollX = SCREEN_WIDTH;
+  scrollDir = -1;
+  isPaused = false;
+}
+
+// =====================================================
+// STARTUP SCREEN
+// =====================================================
+
+void showStartupScreen() {
+
+  unsigned long start = millis();
+
+  unsigned long lastAnim = 0;
+
+  int dotCount = 0;
+
+  while (millis() - start < 6000) {
+
+    if (millis() - lastAnim >= 500) {
+
+      dotCount = (dotCount + 1) % 3;
+
+      lastAnim = millis();
+    }
+
+    String title = "Starting";
+
+    for (int i = 0; i < dotCount; i++) {
+      title += ".";
+    }
+
+    display.clearDisplay();
+
+    display.setTextSize(2);
+    centerText(title, 10);
+
+    display.setTextSize(1);
+    centerText("scoreboard by kian", 46);
+
+    display.display();
+  }
+}
+
+// =====================================================
+// WIFI
+// =====================================================
+
+void connectWiFi() {
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(200);
+  }
+}
+
+// =====================================================
+// CENTER TEXT
+// =====================================================
+
+void centerText(String text, int y) {
+
+  int16_t x1, y1;
+  uint16_t w, h;
+
+  display.getTextBounds(
+    text,
+    0,
+    0,
+    &x1,
+    &y1,
+    &w,
+    &h
+  );
+
+  display.setCursor(
+    (SCREEN_WIDTH - w) / 2,
+    y
+  );
+
+  display.print(text);
+}

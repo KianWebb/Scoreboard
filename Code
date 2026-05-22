@@ -15,8 +15,8 @@
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // WiFi
-const char* ssid = "Kian's Smart";
-const char* password = "SmartHomeDevices";
+const char* ssid = "SSID_HERE";
+const char* password = "PASS_HERE";
 
 // Files
 const char* scoreURL =
